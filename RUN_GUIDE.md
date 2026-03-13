@@ -56,10 +56,10 @@ py manage.py runserver 8000
 ```
 
 ### ✅ Backend Running At:
-- **API**: http://localhost:8000/api/v1/
-- **Admin Panel**: http://localhost:8000/admin/
-- **API Docs (Swagger)**: http://localhost:8000/api/docs/
-- **API Docs (ReDoc)**: http://localhost:8000/api/redoc/
+- **API**: http://192.168.200.116:8000/api/v1/
+- **Admin Panel**: http://192.168.200.116:8000/admin/
+- **API Docs (Swagger)**: http://192.168.200.116:8000/api/docs/
+- **API Docs (ReDoc)**: http://192.168.200.116:8000/api/redoc/
 
 ---
 
@@ -115,7 +115,7 @@ npm run dev
 
 ## 🌐 API Communication
 
-The frontend is configured to communicate with backend at `http://localhost:8000`.
+The frontend is configured to communicate with backend at `http://192.168.200.116:8000`.
 
 ### CORS Configuration (Already Set in Backend)
 The backend allows requests from:
@@ -125,7 +125,7 @@ The backend allows requests from:
 ### API Base URL in Frontend
 Check/update in `frontend/src/lib/api.ts`:
 ```typescript
-const API_BASE_URL = 'http://localhost:8000/api/v1';
+const API_BASE_URL = 'http://192.168.200.116:8000/api/v1';
 ```
 
 ---
@@ -261,7 +261,7 @@ cd "c:\Users\M MOHAMED IMRAN\OneDrive\Desktop\project\backend"
 py manage.py createsuperuser
 ```
 
-Then access admin panel at: http://localhost:8000/admin/
+Then access admin panel at: http://192.168.200.116:8000/admin/
 
 ---
 
@@ -286,8 +286,8 @@ Then access admin panel at: http://localhost:8000/admin/
 
 ## ✅ Verification Checklist
 
-- [ ] Backend running at http://localhost:8000
-- [ ] API docs accessible at http://localhost:8000/api/docs/
+- [ ] Backend running at http://192.168.200.116:8000
+- [ ] API docs accessible at http://192.168.200.116:8000/api/docs/
 - [ ] Frontend running at http://localhost:5173
 - [ ] Frontend can call backend APIs (no CORS errors)
 - [ ] Login/Register working

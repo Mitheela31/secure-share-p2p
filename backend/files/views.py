@@ -44,14 +44,21 @@ def _user_can_download_file(user, file_obj):
 
 
 def _build_plain_file_download_response(file_obj):
-    """Return a direct file download for non-encrypted files stored on disk."""
-    file_obj.file_path.open('rb')
+    """
+    Return a direct file download for non-encrypted files stored on disk.
+
+    Academic note:
+    The file handle is opened in binary mode and streamed via FileResponse so
+    large files are not fully loaded into memory.
+    """
+    file_handle = file_obj.file_path.open('rb')
     response = FileResponse(
-        file_obj.file_path,
+        file_handle,
         as_attachment=True,
         filename=file_obj.original_name,
         content_type=file_obj.mime_type,
     )
+    response['Content-Disposition'] = f'attachment; filename="{file_obj.original_name}"'
     response['X-Content-Type-Options'] = 'nosniff'
     return response
 

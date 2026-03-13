@@ -4,7 +4,7 @@
 
 This document describes the REST API for the Secure File Transfer Backend. The API is built with Django REST Framework and uses JWT authentication.
 
-**Base URL:** `http://localhost:8000/api/v1`
+**Base URL:** `http://192.168.200.116:8000/api/v1`
 
 **Authentication:** Bearer Token (JWT)
 
@@ -896,7 +896,7 @@ useEffect(() => {
 Create `.env` file in frontend:
 
 ```env
-VITE_API_URL=http://localhost:8000/api/v1
+VITE_API_URL=http://192.168.200.116:8000/api/v1
 ```
 
 ---
@@ -905,9 +905,9 @@ VITE_API_URL=http://localhost:8000/api/v1
 
 Interactive API documentation is available at:
 
-- **Swagger UI:** `http://localhost:8000/api/docs/`
-- **ReDoc:** `http://localhost:8000/api/redoc/`
-- **OpenAPI Schema:** `http://localhost:8000/api/schema/`
+- **Swagger UI:** `http://192.168.200.116:8000/api/docs/`
+- **ReDoc:** `http://192.168.200.116:8000/api/redoc/`
+- **OpenAPI Schema:** `http://192.168.200.116:8000/api/schema/`
 
 ---
 
