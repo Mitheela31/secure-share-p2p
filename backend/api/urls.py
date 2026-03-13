@@ -20,4 +20,7 @@ urlpatterns = [
 
     # Crypto endpoints
     path('crypto/', include('crypto.urls')),
+
+    # Activity logging endpoints (Phase 8)
+    path('audit/', include('audit.urls')),
 ]

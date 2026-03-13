@@ -2,8 +2,16 @@
 File metadata models for Secure File Transfer Application.
 Stores file information for P2P transfer tracking.
 
+ENCRYPTION WORKFLOW:
+1. User uploads file via POST /api/v1/files/upload/
+2. Server fetches SessionKey shared secret
+3. Derive AES-256 key using HKDF
+4. Encrypt file with AES-256-GCM
+5. Store: encrypted_file (ciphertext), iv, tag in database
+6. Original file bytes NEVER stored
+
 Note: Actual file content is transferred P2P between clients.
-This model only stores metadata for tracking and history purposes.
+This model stores metadata AND encrypted files for tracking and history purposes.
 """
 
 from django.db import models
@@ -17,6 +25,17 @@ def get_file_upload_path(instance, filename):
     ext = filename.split('.')[-1]
     new_filename = f"{uuid.uuid4()}.{ext}"
     return os.path.join('uploads', str(instance.owner.id), new_filename)
+
+
+def get_encrypted_file_path(instance, filename):
+    """
+    Generate upload path for encrypted files.
+    
+    Path structure: encrypted/<user_id>/<uuid>.enc
+    Files are stored in a separate 'encrypted' directory for security.
+    """
+    new_filename = f"{uuid.uuid4()}.enc"
+    return os.path.join('encrypted', str(instance.owner.id), new_filename)
 
 
 class File(models.Model):
@@ -92,6 +111,60 @@ class File(models.Model):
         help_text="Encryption algorithm used"
     )
     
+    # =========================================================================
+    # AES-256-GCM ENCRYPTION STORAGE
+    # =========================================================================
+    # These fields store the encrypted file and cryptographic parameters
+    # needed for decryption. The AES key is NEVER stored in the database.
+    # =========================================================================
+    
+    encrypted_file = models.FileField(
+        upload_to=get_encrypted_file_path,
+        null=True,
+        blank=True,
+        help_text="Encrypted file content (AES-256-GCM ciphertext)"
+    )
+    
+    iv = models.CharField(
+        max_length=32,  # 12 bytes hex = 24 chars, but allow extra for base64
+        blank=True,
+        null=True,
+        help_text="Hex-encoded AES-GCM initialization vector (12 bytes)"
+    )
+    
+    tag = models.CharField(
+        max_length=48,  # 16 bytes hex = 32 chars, but allow extra for base64
+        blank=True,
+        null=True,
+        help_text="Hex-encoded AES-GCM authentication tag (16 bytes)"
+    )
+    
+    is_decrypted = models.BooleanField(
+        default=False,
+        help_text="Whether file has been decrypted by receiver"
+    )
+    
+    # Download tracking
+    downloaded_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When file was first successfully decrypted and downloaded"
+    )
+    download_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of times file has been downloaded"
+    )
+    
+    # Session reference for decryption
+    session = models.ForeignKey(
+        'crypto.SessionKey',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='encrypted_files',
+        help_text="Session key used for encryption (for decryption lookup)"
+    )
+    
     # Ownership
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -123,9 +196,15 @@ class File(models.Model):
         ordering = ['-uploaded_at']
         verbose_name = 'File'
         verbose_name_plural = 'Files'
+        indexes = [
+            models.Index(fields=['owner', '-uploaded_at']),
+            models.Index(fields=['is_encrypted']),
+            models.Index(fields=['session']),
+        ]
     
     def __str__(self):
-        return f"{self.original_name} ({self.size_formatted})"
+        status = "🔒" if self.is_encrypted else "📄"
+        return f"{status} {self.original_name} ({self.size_formatted})"
     
     @property
     def size_formatted(self):

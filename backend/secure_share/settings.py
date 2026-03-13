@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     'files.apps.FilesConfig',
     'transfers.apps.TransfersConfig',
     'api.apps.ApiConfig',
+    'audit.apps.AuditConfig',
 ]
 
 MIDDLEWARE = [
@@ -142,6 +143,10 @@ SIMPLE_JWT = {
 }
 
 # CORS Configuration - Allow frontend to connect
+# For development: Allow all origins (disable in production!)
+CORS_ALLOW_ALL_ORIGINS = True  # Development only - remove in production
+
+# Specific allowed origins (used when CORS_ALLOW_ALL_ORIGINS is False)
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",  # Vite default
     "http://localhost:3000",  # React default
@@ -151,6 +156,17 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://127.0.0.1:8080",
     "http://127.0.0.1:8081",
+    # LAN IP addresses for cross-device development
+    "http://10.80.187.147:8080",
+    "http://10.80.187.147:5173",
+    "http://10.80.187.147:3000",
+]
+
+# Allow regex patterns for dynamic LAN IPs
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^http://192\.168\.\d{1,3}\.\d{1,3}:\d+$",  # 192.168.x.x
+    r"^http://10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+$",  # 10.x.x.x
+    r"^http://172\.(1[6-9]|2[0-9]|3[0-1])\.\d{1,3}\.\d{1,3}:\d+$",  # 172.16-31.x.x
 ]
 
 CORS_ALLOW_CREDENTIALS = True
@@ -174,6 +190,14 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+]
+
+# Headers to expose in the response (frontend can read these)
+CORS_EXPOSE_HEADERS = [
+    'content-type',
+    'content-length',
+    'content-disposition',
+    'x-content-type-options',
 ]
 
 # Preflight cache - browser caches OPTIONS response for 1 hour

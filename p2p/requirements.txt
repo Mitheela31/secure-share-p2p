@@ -1,0 +1,9 @@
+# Secure P2P File Transfer - Dependencies
+# 
+# Install with: pip install -r requirements.txt
+
+# Cryptography library for ECDH, HKDF, AES-GCM
+cryptography>=41.0.0
+
+# For building standalone executables
+pyinstaller>=6.0.0

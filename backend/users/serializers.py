@@ -7,17 +7,28 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth import get_user_model
+from django.utils import timezone
+from datetime import timedelta
+
+# Import ECDH utilities for key generation during registration
+from crypto.utils import generate_key_pair, serialize_public_key, serialize_private_key
 
 User = get_user_model()
+
+# A user is "online" if their last heartbeat was within this window.
+# Must match ONLINE_THRESHOLD_SECONDS in views_users.py.
+ONLINE_THRESHOLD_SECONDS = 60
 
 
 class UserSerializer(serializers.ModelSerializer):
     """
     Serializer for User model - used for user listing and profile display.
     
-    Frontend mock replacement:
-    - Replaces hardcoded user arrays in recipient selection dropdowns
-    - Provides real user data for transfer history views
+    Key design choice — is_online is a computed field:
+    Rather than trusting the stored boolean (which can be stale when a browser
+    tab is closed without sending a logout), we recompute online status at
+    serialisation time using last_seen.  A user is online iff:
+        last_seen >= now() - ONLINE_THRESHOLD_SECONDS (60 s)
     
     Example Response:
     {
@@ -26,11 +37,28 @@ class UserSerializer(serializers.ModelSerializer):
         "email": "john@example.com",
         "first_name": "John",
         "last_name": "Doe",
-        "is_online": true,
-        "last_activity": "2026-02-06T10:30:00Z",
+        "is_online": true,          ← dynamically computed
+        "last_seen": "2026-03-13T10:30:00Z",
+        "last_activity": "2026-03-13T10:30:00Z",
         "created_at": "2026-01-15T08:00:00Z"
     }
     """
+    
+    # is_online is computed from last_seen at serialisation time.
+    # This prevents the "ghost online" bug: if a user closes the browser
+    # without logging out, they will automatically appear offline once
+    # ONLINE_THRESHOLD_SECONDS have passed with no heartbeat.
+    is_online = serializers.SerializerMethodField()
+
+    def get_is_online(self, obj) -> bool:
+        """
+        Return True only if the user sent a heartbeat within the last 60 s.
+        Falls back to False if last_seen is None (user never sent a heartbeat).
+        """
+        if not obj.last_seen:
+            return False
+        threshold = timezone.now() - timedelta(seconds=ONLINE_THRESHOLD_SECONDS)
+        return obj.last_seen >= threshold
     
     class Meta:
         model = User
@@ -40,11 +68,12 @@ class UserSerializer(serializers.ModelSerializer):
             'email', 
             'first_name', 
             'last_name',
-            'is_online',
+            'is_online',       # computed — see get_is_online()
+            'last_seen',       # raw heartbeat timestamp (for frontend debugging)
             'last_activity',
             'created_at',
         ]
-        read_only_fields = ['id', 'created_at', 'last_activity']
+        read_only_fields = ['id', 'created_at', 'last_activity', 'last_seen']
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -125,8 +154,27 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         return attrs
     
     def create(self, validated_data):
-        """Create user with hashed password."""
+        """
+        Create user with hashed password and generate ECDH key pair.
+        
+        ECDH Key Generation Flow:
+        1. Create the Django User with hashed password
+        2. Generate ECDH key pair (SECP256R1 curve)
+        3. Serialize public key to PEM format
+        4. Serialize private key to PEM format
+        5. Store public key in UserProfile
+        6. Encrypt and store private key in UserPrivateKey
+        
+        Security:
+        - Password is hashed using Django's default hasher (PBKDF2)
+        - Private key is encrypted using Fernet before storage
+        - Private key is NEVER returned in API response
+        """
+        from users.models import UserProfile, UserPrivateKey
+        
         validated_data.pop('password_confirm')
+        
+        # Step 1: Create user with hashed password
         user = User.objects.create_user(
             username=validated_data['username'],
             email=validated_data['email'],
@@ -134,6 +182,38 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             first_name=validated_data.get('first_name', ''),
             last_name=validated_data.get('last_name', ''),
         )
+        
+        try:
+            # Step 2: Generate ECDH key pair using SECP256R1 (P-256) curve
+            private_key, public_key = generate_key_pair()
+            
+            # Step 3: Serialize public key to PEM format (for sharing)
+            public_key_pem = serialize_public_key(public_key)
+            
+            # Step 4: Serialize private key to PEM format (raw bytes)
+            private_key_pem = serialize_private_key(private_key)
+            
+            # Step 5: Create UserProfile and store public key
+            UserProfile.objects.create(
+                user=user,
+                public_key=public_key_pem.decode('utf-8'),
+                key_created_at=timezone.now()
+            )
+            
+            # Step 6: Encrypt and store private key securely
+            encrypted_private_key = UserPrivateKey.encrypt_private_key(private_key_pem)
+            UserPrivateKey.objects.create(
+                user=user,
+                encrypted_private_key=encrypted_private_key
+            )
+            
+        except Exception as e:
+            # If key generation fails, delete the user to maintain consistency
+            user.delete()
+            raise serializers.ValidationError(
+                f"Failed to generate encryption keys: {str(e)}"
+            )
+        
         return user
 
 

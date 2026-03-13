@@ -46,6 +46,7 @@ class Transfer(models.Model):
     # Transfer status choices
     STATUS_CHOICES = [
         ('pending', 'Pending'),           # Transfer created, waiting for receiver
+        ('sent', 'Sent'),                 # File encrypted and ready for download
         ('accepted', 'Accepted'),         # Receiver accepted, ready to start
         ('rejected', 'Rejected'),         # Receiver rejected transfer
         ('connecting', 'Connecting'),     # P2P connection establishing
@@ -107,6 +108,48 @@ class Transfer(models.Model):
         max_length=50,
         default='AES-256-GCM',
         help_text="Encryption algorithm used for this transfer"
+    )
+
+    # ===========================================================================
+    # ENCRYPTED AES KEY
+    # ===========================================================================
+    # The AES key used to encrypt the file is itself encrypted using the
+    # ECDH-derived shared secret between sender and receiver.
+    # This ensures only the intended receiver can decrypt the file.
+    #
+    # Storage format: Base64-encoded encrypted AES key
+    # The encryption uses AES-256-GCM with the shared secret as key
+    # ===========================================================================
+    encrypted_aes_key = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Base64-encoded AES key encrypted with ECDH shared secret"
+    )
+    
+    # IV used for encrypting the AES key (different from file IV)
+    key_iv = models.CharField(
+        max_length=32,
+        blank=True,
+        null=True,
+        help_text="Hex-encoded IV used to encrypt the AES key"
+    )
+    
+    # Authentication tag for the encrypted AES key
+    key_tag = models.CharField(
+        max_length=48,
+        blank=True,
+        null=True,
+        help_text="Hex-encoded authentication tag for encrypted AES key"
+    )
+    
+    # Session reference for key exchange
+    session = models.ForeignKey(
+        'crypto.SessionKey',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='transfers',
+        help_text="Session key used for ECDH key exchange"
     )
 
     # Transfer status and progress

@@ -1,0 +1,21 @@
+# Django Backend Requirements
+# Production-ready dependencies for file transfer application
+
+# Core Django
+Django>=4.2,<5.0
+djangorestframework>=3.14.0
+
+# Authentication
+djangorestframework-simplejwt>=5.3.0
+
+# CORS Support for Frontend Integration
+django-cors-headers>=4.3.0
+
+# Database (SQLite is built-in, but we need this for migrations)
+# SQLite3 is included with Python
+
+# Utility
+python-dotenv>=1.0.0
+
+# API Documentation
+drf-spectacular>=0.27.0

@@ -11,6 +11,10 @@ This model replaces frontend mock data for:
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.utils import timezone
+from django.conf import settings
+from cryptography.fernet import Fernet
+import base64
+import hashlib
 import uuid
 
 
@@ -42,13 +46,30 @@ class User(AbstractUser):
     # Extended profile fields
     is_online = models.BooleanField(
         default=False, 
-        help_text="Whether user is currently online"
+        help_text="Whether user is currently online (legacy flag — use last_seen for accuracy)"
     )
     last_activity = models.DateTimeField(
         null=True, 
         blank=True,
         help_text="Last activity timestamp"
     )
+
+    # -------------------------------------------------------------------------
+    # PHASE 8 FIX: last_seen — heartbeat-based presence detection
+    # -------------------------------------------------------------------------
+    # Unlike `is_online` (a boolean that can get stuck), `last_seen` is a
+    # timestamp set every time the frontend sends a heartbeat POST.
+    # A user is considered "online" only if:
+    #   last_seen >= now() - ONLINE_THRESHOLD_SECONDS (60 seconds)
+    # This automatically expires once no heartbeat is received, avoiding the
+    # "ghost online" bug where closed browsers still appear active.
+    # -------------------------------------------------------------------------
+    last_seen = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Last heartbeat timestamp — used to compute real-time online status"
+    )
+
     created_at = models.DateTimeField(
         auto_now_add=True,
         help_text="Account creation timestamp"
@@ -72,11 +93,27 @@ class User(AbstractUser):
         self.last_activity = timezone.now()
         self.save(update_fields=['last_activity'])
     
-    def set_online(self, status=True):
-        """Set user online status."""
-        self.is_online = status
+    def update_last_seen(self):
+        """
+        Record a fresh heartbeat timestamp.
+
+        Called by the /users/heartbeat/ endpoint every ~30 s.
+        The `is_online` computed property (see UserSerializer) evaluates
+        this value at query time so no boolean flag can become stale.
+        """
+        now = timezone.now()
+        self.last_seen = now
+        self.last_activity = now
+        self.is_online = True   # kept in sync for legacy queries
+        self.save(update_fields=['last_seen', 'last_activity', 'is_online'])
+
+    def set_online(self, online_status=True):
+        """Set user online status (legacy — prefer update_last_seen for heartbeats)."""
+        self.is_online = online_status
         self.last_activity = timezone.now()
-        self.save(update_fields=['is_online', 'last_activity'])
+        if online_status:
+            self.last_seen = timezone.now()
+        self.save(update_fields=['is_online', 'last_activity', 'last_seen'])
 
 
 class UserProfile(models.Model):
@@ -117,4 +154,109 @@ class UserProfile(models.Model):
         self.public_key = key
         self.key_created_at = timezone.now()
         self.save(update_fields=['public_key', 'key_created_at'])
+
+
+class UserPrivateKey(models.Model):
+    """
+    Secure storage for user's ECDH private key.
+    
+    The private key is encrypted using Fernet symmetric encryption
+    derived from Django's SECRET_KEY. This ensures:
+    - Private keys are never stored in plaintext
+    - Keys are only accessible server-side
+    - Database compromise doesn't expose raw private keys
+    
+    SECURITY NOTES:
+    - Never expose encrypted_private_key in API responses
+    - Only decrypt when performing ECDH key exchange
+    - Consider using HSM or vault in production
+    """
+    
+    user = models.OneToOneField(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='private_key_storage',
+        help_text="Associated user account"
+    )
+    encrypted_private_key = models.TextField(
+        help_text="Fernet-encrypted ECDH private key (PEM format)"
+    )
+    key_id = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        help_text="Unique identifier for key rotation tracking"
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When the private key was created"
+    )
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        help_text="When the private key was last updated"
+    )
+    
+    class Meta:
+        db_table = 'user_private_keys'
+        verbose_name = 'User Private Key'
+        verbose_name_plural = 'User Private Keys'
+    
+    def __str__(self):
+        return f"Private Key for {self.user.username} (ID: {self.key_id})"
+    
+    @staticmethod
+    def _get_encryption_key():
+        """
+        Derive a Fernet-compatible encryption key from Django's SECRET_KEY.
+        
+        Uses SHA-256 to create a 32-byte key, then base64 encode for Fernet.
+        This ensures consistent key derivation across the application.
+        """
+        # Use Django's SECRET_KEY as the basis for encryption
+        secret = settings.SECRET_KEY.encode('utf-8')
+        # Derive a 32-byte key using SHA-256
+        key_bytes = hashlib.sha256(secret).digest()
+        # Fernet requires base64-encoded 32-byte key
+        return base64.urlsafe_b64encode(key_bytes)
+    
+    @classmethod
+    def encrypt_private_key(cls, private_key_pem: bytes) -> str:
+        """
+        Encrypt a PEM-encoded private key for secure storage.
+        
+        Args:
+            private_key_pem: Raw PEM bytes of the ECDH private key
+            
+        Returns:
+            str: Base64-encoded encrypted private key
+        """
+        fernet = Fernet(cls._get_encryption_key())
+        encrypted = fernet.encrypt(private_key_pem)
+        return encrypted.decode('utf-8')
+    
+    @classmethod
+    def decrypt_private_key(cls, encrypted_key: str) -> bytes:
+        """
+        Decrypt an encrypted private key for ECDH operations.
+        
+        Args:
+            encrypted_key: Base64-encoded encrypted private key
+            
+        Returns:
+            bytes: Raw PEM bytes of the ECDH private key
+            
+        Raises:
+            InvalidToken: If decryption fails (wrong key or corrupted data)
+        """
+        fernet = Fernet(cls._get_encryption_key())
+        return fernet.decrypt(encrypted_key.encode('utf-8'))
+    
+    def get_decrypted_private_key(self) -> bytes:
+        """
+        Get the decrypted private key PEM bytes for this user.
+        
+        Returns:
+            bytes: Raw PEM bytes of the ECDH private key
+        """
+        return self.decrypt_private_key(self.encrypted_private_key)
+
 

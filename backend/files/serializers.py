@@ -38,6 +38,11 @@ class FileSerializer(serializers.ModelSerializer):
         "checksum": "abc123def456...",
         "is_encrypted": true,
         "encryption_algorithm": "AES-256-GCM",
+        "has_encrypted_content": true,
+        "is_decrypted": false,
+        "downloaded_at": "2026-02-20T12:00:00Z",
+        "download_count": 1,
+        "session_id": 123,
         "owner": {
             "id": 1,
             "username": "john_doe",
@@ -46,11 +51,18 @@ class FileSerializer(serializers.ModelSerializer):
         "uploaded_at": "2026-02-06T10:30:00Z",
         "extension": ".pdf"
     }
+    
+    SECURITY NOTE:
+    - IV and tag are NOT included (they're stored but not exposed by default)
+    - encrypted_file path is NOT exposed
+    - To download, use a dedicated secure endpoint
     """
     
     owner = FileOwnerSerializer(read_only=True)
     size_formatted = serializers.ReadOnlyField()
     extension = serializers.ReadOnlyField()
+    has_encrypted_content = serializers.SerializerMethodField()
+    session_id = serializers.PrimaryKeyRelatedField(source='session', read_only=True)
     
     class Meta:
         model = File
@@ -65,11 +77,20 @@ class FileSerializer(serializers.ModelSerializer):
             'checksum',
             'is_encrypted',
             'encryption_algorithm',
+            'has_encrypted_content',
+            'is_decrypted',
+            'downloaded_at',
+            'download_count',
+            'session_id',
             'owner',
             'uploaded_at',
             'extension',
         ]
-        read_only_fields = ['id', 'uuid', 'owner', 'uploaded_at']
+        read_only_fields = ['id', 'uuid', 'owner', 'uploaded_at', 'is_decrypted', 'downloaded_at', 'download_count']
+    
+    def get_has_encrypted_content(self, obj):
+        """Check if file has encrypted content stored."""
+        return bool(obj.encrypted_file)
 
 
 class FileCreateSerializer(serializers.ModelSerializer):
@@ -257,3 +278,118 @@ class FileUploadSerializer(serializers.Serializer):
                 f"File size exceeds maximum for direct upload ({max_size / (1024**2):.0f} MB)."
             )
         return value
+
+
+class SecureFileUploadSerializer(serializers.Serializer):
+    """
+    Serializer for secure encrypted file upload.
+    
+    FLOW:
+    1. User uploads file + receiver_id
+    2. Server validates active session exists between sender and receiver
+    3. Server derives AES-256 key from session's shared secret
+    4. Server encrypts file using AES-256-GCM
+    5. Server stores: encrypted file, IV, authentication tag
+    6. Original plaintext is NEVER stored
+    
+    Request: multipart/form-data
+    {
+        "file": <file>,
+        "receiver_id": 123
+    }
+    
+    Response:
+    {
+        "status": "success",
+        "message": "File encrypted and stored securely",
+        "file_id": 456
+    }
+    
+    MEMORY SAFETY NOTE:
+    Files are loaded entirely into memory for AES-GCM encryption.
+    Max size is limited to prevent memory exhaustion attacks.
+    """
+    
+    # Maximum file size for encrypted upload (100 MB)
+    # This limit ensures server memory safety during encryption
+    # AES-GCM requires full message in memory for authentication
+    MAX_ENCRYPTED_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
+    
+    file = serializers.FileField(
+        help_text="File to encrypt and upload"
+    )
+    receiver_id = serializers.IntegerField(
+        help_text="ID of the intended receiver (must have active session)"
+    )
+    
+    def validate_file(self, value):
+        """
+        Validate uploaded file.
+        
+        Security checks:
+        - File size within limits (memory safety)
+        - File is not empty
+        """
+        if value.size > self.MAX_ENCRYPTED_UPLOAD_SIZE:
+            raise serializers.ValidationError(
+                f"File size exceeds maximum for encrypted upload "
+                f"({self.MAX_ENCRYPTED_UPLOAD_SIZE / (1024**2):.0f} MB). "
+                f"For larger files, use chunked transfer."
+            )
+        if value.size == 0:
+            raise serializers.ValidationError("Cannot upload empty file.")
+        return value
+    
+    def validate_receiver_id(self, value):
+        """Validate receiver exists."""
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        
+        if not User.objects.filter(id=value).exists():
+            raise serializers.ValidationError("Receiver user not found.")
+        return value
+    
+    def validate(self, attrs):
+        """
+        Cross-field validation.
+        
+        Validates:
+        - Receiver is not the sender
+        - Active session exists between sender and receiver
+        """
+        request = self.context.get('request')
+        if not request or not request.user:
+            raise serializers.ValidationError("Authentication required.")
+        
+        receiver_id = attrs.get('receiver_id')
+        
+        # Cannot send to yourself
+        if request.user.id == receiver_id:
+            raise serializers.ValidationError({
+                "receiver_id": "Cannot send encrypted file to yourself."
+            })
+        
+        # Validate active session exists
+        from crypto.models import SessionKey
+        
+        session = SessionKey.objects.filter(
+            sender=request.user,
+            receiver_id=receiver_id,
+            is_active=True
+        ).first()
+        
+        if not session:
+            raise serializers.ValidationError({
+                "receiver_id": "No active session with this receiver. Please initiate key exchange first."
+            })
+        
+        # Check session validity (not expired)
+        if not session.is_valid:
+            raise serializers.ValidationError({
+                "receiver_id": "Session has expired. Please initiate a new key exchange."
+            })
+        
+        # Attach session to validated data for use in view
+        attrs['session'] = session
+        
+        return attrs

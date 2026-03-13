@@ -290,7 +290,8 @@ class TransferUpdateSerializer(serializers.ModelSerializer):
             return value
         
         valid_transitions = {
-            'pending': ['accepted', 'rejected', 'cancelled'],
+            'pending': ['accepted', 'rejected', 'cancelled', 'sent'],
+            'sent': ['completed', 'failed', 'cancelled'],  # Secure transfer flow
             'accepted': ['connecting', 'cancelled'],
             'connecting': ['key_exchange', 'failed', 'cancelled'],
             'key_exchange': ['transferring', 'failed', 'cancelled'],
@@ -439,3 +440,251 @@ class TransferActionSerializer(serializers.Serializer):
             })
         
         return attrs
+
+
+# ==============================================================================
+# SECURE FILE TRANSFER SERIALIZERS (Phase 7)
+# ==============================================================================
+# These serializers handle the encrypted file transfer workflow:
+# 1. SecureTransferInitiateSerializer - Start an encrypted transfer
+# 2. SecureTransferFileSerializer - Return encrypted file data for download
+# ==============================================================================
+
+
+class SecureTransferInitiateSerializer(serializers.Serializer):
+    """
+    Serializer for initiating a secure encrypted file transfer.
+    
+    ═══════════════════════════════════════════════════════════════════════════
+    SECURE TRANSFER WORKFLOW
+    ═══════════════════════════════════════════════════════════════════════════
+    
+    1. SENDER: Uploads file and specifies receiver
+    2. SYSTEM: Derives shared secret between sender and receiver using ECDH
+    3. SYSTEM: Generates random AES-256 key for file encryption
+    4. SYSTEM: Encrypts file using AES-256-GCM with the AES key
+    5. SYSTEM: Encrypts the AES key using the shared secret
+    6. SYSTEM: Creates Transfer record with encrypted file and encrypted AES key
+    7. RECEIVER: Downloads encrypted file + encrypted AES key
+    8. RECEIVER: Derives same shared secret using ECDH
+    9. RECEIVER: Decrypts AES key using shared secret
+    10. RECEIVER: Decrypts file using AES key
+    
+    ═══════════════════════════════════════════════════════════════════════════
+    
+    Request Body:
+    {
+        "file_id": 123,           # Existing file to transfer (optional if file provided)
+        "receiver_id": 456,       # ID of intended receiver
+        "file": <uploaded file>   # File to encrypt and transfer (optional if file_id)
+    }
+    
+    Response (201 Created):
+    {
+        "transfer_id": 789,
+        "uuid": "...",
+        "status": "sent",
+        "message": "Secure file transfer initiated successfully",
+        "data": {
+            "sender": "john_doe",
+            "receiver": "jane_smith",
+            "file_name": "document.pdf",
+            "file_size": 1048576,
+            "encryption_algorithm": "AES-256-GCM"
+        }
+    }
+    """
+    
+    # Maximum file size for encrypted transfer (100 MB)
+    MAX_FILE_SIZE = 100 * 1024 * 1024
+    
+    file_id = serializers.IntegerField(
+        required=False,
+        help_text="ID of existing file to transfer"
+    )
+    receiver_id = serializers.IntegerField(
+        help_text="ID of the user to receive the file"
+    )
+    file = serializers.FileField(
+        required=False,
+        help_text="File to encrypt and transfer (if not using file_id)"
+    )
+    
+    def validate_receiver_id(self, value):
+        """
+        Validate receiver exists and is not the sender.
+        
+        Security checks:
+        - Receiver user exists
+        - Receiver is not the sender (self-transfer prevention)
+        - Receiver has a public key registered (required for ECDH)
+        """
+        request = self.context.get('request')
+        
+        if value == request.user.id:
+            raise serializers.ValidationError(
+                "You cannot send files to yourself."
+            )
+        
+        if not User.objects.filter(id=value).exists():
+            raise serializers.ValidationError(
+                "Receiver user not found."
+            )
+        
+        # Check if receiver has a profile with public key
+        from users.models import UserProfile
+        try:
+            profile = UserProfile.objects.get(user_id=value)
+            if not profile.public_key:
+                raise serializers.ValidationError(
+                    "Receiver has not set up encryption keys. "
+                    "They must register their public key first."
+                )
+        except UserProfile.DoesNotExist:
+            raise serializers.ValidationError(
+                "Receiver has not set up their profile. "
+                "They must complete setup first."
+            )
+        
+        return value
+    
+    def validate_file_id(self, value):
+        """Validate file exists and belongs to sender."""
+        request = self.context.get('request')
+        
+        if not File.objects.filter(id=value, owner=request.user).exists():
+            raise serializers.ValidationError(
+                "File not found or you don't own this file."
+            )
+        
+        return value
+    
+    def validate_file(self, value):
+        """Validate uploaded file size."""
+        if value.size > self.MAX_FILE_SIZE:
+            raise serializers.ValidationError(
+                f"File size exceeds maximum ({self.MAX_FILE_SIZE / (1024**2):.0f} MB). "
+                f"For larger files, use chunked transfer."
+            )
+        if value.size == 0:
+            raise serializers.ValidationError("Cannot transfer empty file.")
+        return value
+    
+    def validate(self, attrs):
+        """
+        Cross-field validation for secure transfer.
+        
+        Validates:
+        - Either file_id or file is provided (not both, not neither)
+        - Session exists or can be created between sender and receiver
+        """
+        file_id = attrs.get('file_id')
+        file = attrs.get('file')
+        
+        if not file_id and not file:
+            raise serializers.ValidationError({
+                "file": "Either file_id or file must be provided."
+            })
+        
+        if file_id and file:
+            raise serializers.ValidationError({
+                "file": "Provide either file_id OR file, not both."
+            })
+        
+        return attrs
+
+
+class SecureTransferDownloadSerializer(serializers.Serializer):
+    """
+    Serializer for secure file download response data.
+    
+    This serializer is used to format the response when receiver
+    requests to download an encrypted file transfer.
+    
+    Response includes:
+    - Encrypted file data (or URL to download)
+    - Encrypted AES key (to decrypt the file)
+    - IV and tag for AES key decryption
+    - File metadata
+    """
+    
+    transfer_id = serializers.IntegerField(read_only=True)
+    uuid = serializers.UUIDField(read_only=True)
+    file_name = serializers.CharField(read_only=True)
+    file_size = serializers.IntegerField(read_only=True)
+    mime_type = serializers.CharField(read_only=True)
+    encryption_algorithm = serializers.CharField(read_only=True)
+    encrypted_aes_key = serializers.CharField(read_only=True)
+    key_iv = serializers.CharField(read_only=True)
+    key_tag = serializers.CharField(read_only=True)
+    file_iv = serializers.CharField(read_only=True)
+    file_tag = serializers.CharField(read_only=True)
+    sender = serializers.CharField(read_only=True)
+    created_at = serializers.DateTimeField(read_only=True)
+
+
+class SecureTransferDetailSerializer(serializers.ModelSerializer):
+    """
+    Detailed serializer for secure transfer with encryption metadata.
+    
+    Used for transfer status checks and download preparation.
+    
+    SECURITY NOTE:
+    - Encrypted AES key is only included for authorized receiver
+    - Session details are never exposed
+    """
+    
+    sender = TransferUserSerializer(read_only=True)
+    receiver = TransferUserSerializer(read_only=True)
+    file = TransferFileSerializer(read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    
+    # Include encrypted AES key only for receiver to decrypt
+    encrypted_aes_key = serializers.SerializerMethodField()
+    key_iv = serializers.SerializerMethodField()
+    key_tag = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Transfer
+        fields = [
+            'id',
+            'uuid',
+            'sender',
+            'receiver',
+            'file',
+            'file_name',
+            'status',
+            'status_display',
+            'encryption_algorithm',
+            'encrypted_aes_key',
+            'key_iv',
+            'key_tag',
+            'created_at',
+            'completed_at',
+        ]
+    
+    def get_encrypted_aes_key(self, obj):
+        """
+        Only return encrypted AES key if requester is the receiver.
+        
+        SECURITY: The sender doesn't need the encrypted key back,
+        only the receiver needs it to decrypt the file.
+        """
+        request = self.context.get('request')
+        if request and request.user == obj.receiver:
+            return obj.encrypted_aes_key
+        return None
+    
+    def get_key_iv(self, obj):
+        """Only return key IV if requester is the receiver."""
+        request = self.context.get('request')
+        if request and request.user == obj.receiver:
+            return obj.key_iv
+        return None
+    
+    def get_key_tag(self, obj):
+        """Only return key tag if requester is the receiver."""
+        request = self.context.get('request')
+        if request and request.user == obj.receiver:
+            return obj.key_tag
+        return None
