@@ -20,7 +20,10 @@ urlpatterns = [
     # File CRUD
     path('', FileListCreateView.as_view(), name='file-list-create'),
     path('<int:pk>/', FileDetailView.as_view(), name='file-detail'),
+    # Canonical download endpoint expected by frontend
     path('<int:file_id>/download/', FileDownloadView.as_view(), name='file-download'),
+    # Compatibility route for clients that omit trailing slash
+    path('<int:file_id>/download', FileDownloadView.as_view(), name='file-download-no-slash'),
     path('uuid/<uuid:uuid>/', FileByUUIDView.as_view(), name='file-by-uuid'),
     
     # Direct upload (non-P2P, non-encrypted)

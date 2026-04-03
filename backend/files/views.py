@@ -37,9 +37,16 @@ def _user_can_download_file(user, file_obj):
     A download is allowed only when the authenticated user is either:
     1. The sender / uploader (file.owner)
     2. The intended receiver bound to the encryption session
+    3. The receiver recorded on a transfer linked to this file
+
+    The transfer lookup is required because some flows resolve the receiver
+    from the Transfer record even when the file/session relation is not
+    sufficient on its own.
     """
     is_owner = file_obj.owner == user
-    is_receiver = bool(file_obj.session and file_obj.session.receiver == user)
+    is_session_receiver = bool(file_obj.session and file_obj.session.receiver == user)
+    is_transfer_receiver = file_obj.transfers.filter(receiver=user).exists()
+    is_receiver = is_session_receiver or is_transfer_receiver
     return is_owner, is_receiver
 
 

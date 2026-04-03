@@ -8,6 +8,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
 
@@ -24,6 +25,9 @@ User = get_user_model()
 # This value must match ONLINE_THRESHOLD_SECONDS in serializers.py.
 # ---------------------------------------------------------------------------
 ONLINE_THRESHOLD_SECONDS = 60
+STALE_USER_THRESHOLD_MINUTES = int(
+    getattr(settings, 'STALE_USER_THRESHOLD_MINUTES', 1)
+)
 
 
 def online_since():
@@ -406,7 +410,9 @@ class CleanupStaleUsersView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     
     def post(self, request):
-        threshold_minutes = request.data.get('threshold_minutes', STALE_USER_THRESHOLD_MINUTES)
+        threshold_minutes = int(
+            request.data.get('threshold_minutes', STALE_USER_THRESHOLD_MINUTES)
+        )
         
         threshold = timezone.now() - timedelta(minutes=threshold_minutes)
         stale_users = User.objects.filter(

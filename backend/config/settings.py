@@ -170,6 +170,10 @@ CORS_ALLOW_HEADERS = [
     'x-requested-with',
 ]
 
+# Online presence / heartbeat configuration
+# Users are treated as stale when they stop sending heartbeats for this many minutes.
+STALE_USER_THRESHOLD_MINUTES = 1
+
 # DRF Spectacular (API Documentation)
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Secure File Transfer API',
