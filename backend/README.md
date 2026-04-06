@@ -90,7 +90,7 @@ This creates sample users, files, and transfers for testing.
 ### 6. Run Development Server
 
 ```bash
-python manage.py runserver
+python manage.py runserver 0.0.0.0:8000
 ```
 
 Server runs at: `http://192.168.200.116:8000`

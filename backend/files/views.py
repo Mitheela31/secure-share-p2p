@@ -206,6 +206,17 @@ def _build_download_response(request, file_obj):
     user = request.user
     is_owner, is_receiver = _user_can_download_file(user, file_obj)
 
+    if not file_obj.encrypted_file:
+        logger.error(
+            'Download rejected because encrypted_file is missing: user=%s file_id=%s',
+            user.id,
+            file_obj.id,
+        )
+        return Response({
+            'status': 'error',
+            'message': 'No encrypted content available for this file.'
+        }, status=status.HTTP_404_NOT_FOUND)
+
     if not (is_owner or is_receiver):
         logger.warning(
             f"Unauthorized download attempt: user={user.id}, file={file_obj.id}"
@@ -391,32 +402,40 @@ class FileUploadView(APIView):
     parser_classes = [MultiPartParser, FormParser]
     
     def post(self, request):
-        serializer = FileUploadSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        
-        uploaded_file = serializer.validated_data['file']
-        is_encrypted = serializer.validated_data['is_encrypted']
-        
-        # Calculate checksum
+        uploaded_file = request.FILES.get('file')
+        if not uploaded_file:
+            logger.error('Encrypted file upload rejected: no file provided by user=%s', request.user.id)
+            return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        original_name = request.data.get('filename') or uploaded_file.name
+
         hasher = hashlib.sha256()
         for chunk in uploaded_file.chunks():
             hasher.update(chunk)
         checksum = hasher.hexdigest()
-        
-        # Create file record
+
+        logger.info(
+            'Uploading encrypted file for storage: user=%s filename=%s size=%s',
+            request.user.id,
+            original_name,
+            uploaded_file.size,
+        )
+
         file_obj = File.objects.create(
-            name=uploaded_file.name,
-            original_name=uploaded_file.name,
+            name=original_name,
+            original_name=original_name,
             size=uploaded_file.size,
             mime_type=uploaded_file.content_type or 'application/octet-stream',
             checksum=checksum,
-            is_encrypted=is_encrypted,
+            is_encrypted=False,
             owner=request.user,
+            encrypted_file=uploaded_file,
             file_path=uploaded_file,
         )
-        
-        response_serializer = FileSerializer(file_obj)
-        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+        logger.info('Encrypted file stored successfully: file_id=%s encrypted_file=%s', file_obj.id, bool(file_obj.encrypted_file))
+
+        return Response({"id": file_obj.id}, status=status.HTTP_201_CREATED)
 
 
 class FileChunkListView(generics.ListCreateAPIView):

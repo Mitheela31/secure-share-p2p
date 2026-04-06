@@ -16,7 +16,7 @@ SECRET_KEY = 'django-insecure-change-this-in-production-abc123xyz789'
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*']
+ALLOWED_HOSTS = ['*']
 
 # Application definition
 INSTALLED_APPS = [
@@ -141,11 +141,12 @@ SIMPLE_JWT = {
 
 # CORS Configuration - Allow frontend to connect
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",  # Vite default
-    "http://localhost:3000",  # React default
     "http://127.0.0.1:5173",
     "http://127.0.0.1:3000",
 ]
+
+# Development/LAN mode: allow frontend access from hotspot clients.
+CORS_ALLOW_ALL_ORIGINS = True
 
 CORS_ALLOW_CREDENTIALS = True
 
