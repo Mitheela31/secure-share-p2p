@@ -1,11 +1,3 @@
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.backends import default_backend
-import os
-import base64
-
 """
 Production-ready ECDH and AES-GCM encryption utilities using Python cryptography library.
 
@@ -16,7 +8,7 @@ This module provides:
 AES-GCM (Galois/Counter Mode) Flow:
 1. Derive AES-256 key from ECDH shared secret using HKDF
 2. Generate cryptographically secure random 96-bit (12 byte) IV/nonce
-3. Encrypt plaintext → ciphertext with authentication tag
+3. Encrypt plaintext -> ciphertext with authentication tag
 4. Store: ciphertext + IV + tag (all needed for decryption)
 
 Security Properties:
@@ -25,6 +17,14 @@ Security Properties:
 - Authenticity: Tag verification prevents tampering
 - Nonce uniqueness: Random IV for each encryption
 """
+
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.backends import default_backend
+import os
+import base64
 
 # ==============================================================================
 # AES-GCM ENCRYPTION CONSTANTS

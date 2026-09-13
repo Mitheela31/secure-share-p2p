@@ -2,6 +2,8 @@
 Transfer serializers for API request/response handling.
 """
 
+import base64
+
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -10,6 +12,24 @@ from .models import Transfer, TransferLog
 from files.models import File
 
 User = get_user_model()
+
+
+def _decode_base64_bytes(value: str, field_name: str, expected_length: int) -> bytes:
+    if not value or not str(value).strip():
+        raise serializers.ValidationError({field_name: f'{field_name} is required.'})
+
+    cleaned = str(value).strip().replace('\n', '').replace('\r', '').replace(' ', '')
+    padded = cleaned + ('=' * ((4 - len(cleaned) % 4) % 4))
+
+    try:
+        decoded = base64.b64decode(padded, validate=True)
+    except Exception as error:
+        raise serializers.ValidationError({field_name: f'{field_name} must be valid base64.'}) from error
+
+    if len(decoded) != expected_length:
+        raise serializers.ValidationError({field_name: f'{field_name} must be {expected_length} bytes when decoded.'})
+
+    return decoded
 
 
 class TransferUserSerializer(serializers.ModelSerializer):
@@ -82,6 +102,8 @@ class TransferSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     speed_formatted = serializers.ReadOnlyField()
     duration = serializers.ReadOnlyField()
+    aes_key = serializers.CharField(source='encrypted_aes_key', read_only=True)
+    iv = serializers.CharField(source='file.iv', read_only=True)
     
     class Meta:
         model = Transfer
@@ -91,6 +113,11 @@ class TransferSerializer(serializers.ModelSerializer):
             'sender',
             'receiver',
             'file',
+            'file_name',
+            'aes_key',
+            'iv',
+            'encrypted_aes_key',
+            'key_iv',
             'status',
             'status_display',
             'progress',
@@ -140,13 +167,16 @@ class TransferCreateSerializer(serializers.Serializer):
         help_text="ID of the user to receive the file"
     )
     file_id = serializers.IntegerField(
-        required=False,
+        required=True,
         help_text="ID of existing file to transfer"
     )
-    file_data = serializers.DictField(
-        required=False,
-        help_text="File metadata for inline creation"
-    )
+    file_name = serializers.CharField(required=True, allow_blank=False, help_text="Original file name")
+    aes_key = serializers.CharField(required=True, allow_blank=False, help_text="Base64 AES-256 file key")
+    iv = serializers.CharField(required=True, allow_blank=False, help_text="12-byte file IV in base64")
+
+    # Backward-compatible aliases for older clients.
+    encrypted_aes_key = serializers.CharField(required=False, allow_blank=False, write_only=True)
+    key_iv = serializers.CharField(required=False, allow_blank=False, write_only=True)
     
     def validate_receiver_id(self, value):
         """Validate receiver exists and is not the sender."""
@@ -176,13 +206,48 @@ class TransferCreateSerializer(serializers.Serializer):
         return value
     
     def validate(self, attrs):
-        """Ensure either file_id or file_data is provided."""
+        """Strict transfer validation: file_id, file_name, aes_key, and iv are mandatory."""
         file_id = attrs.get('file_id')
-        file_data = attrs.get('file_data')
-        
-        if not file_id and not file_data:
+
+        if not file_id:
             raise serializers.ValidationError({
-                "file_id": "Either file_id or file_data is required."
+                "file_id": "file_id is required."
+            })
+
+        file_obj = File.objects.filter(id=file_id, owner=self.context.get('request').user).first()
+        if not file_obj:
+            raise serializers.ValidationError({
+                "file_id": "File not found or you don't own this file."
+            })
+
+        file_name = attrs.get('file_name')
+        if not file_name:
+            raise serializers.ValidationError({
+                "file_name": "file_name is required."
+            })
+
+        if file_name != file_obj.original_name:
+            raise serializers.ValidationError({
+                "file_name": "file_name does not match the uploaded file name."
+            })
+
+        aes_key = attrs.get('aes_key') or attrs.get('encrypted_aes_key')
+        if not aes_key:
+            raise serializers.ValidationError({
+                "aes_key": "aes_key is required."
+            })
+
+        if attrs.get('encrypted_aes_key') and attrs.get('aes_key') and attrs.get('encrypted_aes_key') != attrs.get('aes_key'):
+            raise serializers.ValidationError({
+                "aes_key": "aes_key and encrypted_aes_key must match when both are provided."
+            })
+
+        _decode_base64_bytes(aes_key, 'aes_key', 32)
+        _decode_base64_bytes(attrs.get('iv'), 'iv', 12)
+
+        if file_obj.iv and file_obj.iv != attrs.get('iv'):
+            raise serializers.ValidationError({
+                "iv": "Transfer IV does not match file IV."
             })
         
         return attrs
@@ -192,29 +257,26 @@ class TransferCreateSerializer(serializers.Serializer):
         request = self.context.get('request')
         sender = request.user
         receiver = User.objects.get(id=validated_data['receiver_id'])
-        
-        # Get or create file
-        if validated_data.get('file_id'):
-            file_obj = File.objects.get(id=validated_data['file_id'])
-        else:
-            # Create file from inline data
-            file_data = validated_data['file_data']
-            file_obj = File.objects.create(
-                name=file_data.get('original_name', 'unnamed'),
-                original_name=file_data.get('original_name', 'unnamed'),
-                size=file_data.get('size', 0),
-                mime_type=file_data.get('mime_type', 'application/octet-stream'),
-                checksum=file_data.get('checksum'),
-                owner=sender,
-            )
+        file_obj = File.objects.get(id=validated_data['file_id'])
         
         # Create transfer
         transfer = Transfer.objects.create(
             sender=sender,
             receiver=receiver,
             file=file_obj,
+            file_name=validated_data['file_name'],
+            encrypted_file_path=file_obj.encrypted_file.name if file_obj.encrypted_file else None,
+            encryption_algorithm='AES-256-GCM',
+            encrypted_aes_key=validated_data.get('aes_key') or validated_data.get('encrypted_aes_key'),
+            key_iv=None,
+            key_tag=None,
+            session=file_obj.session,
             status='pending',
         )
+
+        if not file_obj.iv:
+            file_obj.iv = validated_data['iv']
+            file_obj.save(update_fields=['iv', 'updated_at'])
         
         # Create log entry
         TransferLog.objects.create(

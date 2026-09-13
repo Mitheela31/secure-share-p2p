@@ -90,10 +90,10 @@ This creates sample users, files, and transfers for testing.
 ### 6. Run Development Server
 
 ```bash
-python manage.py runserver 0.0.0.0:8000
+python manage.py runserver 127.0.0.1:8000
 ```
 
-Server runs at: `http://192.168.200.116:8000`
+Server runs at: `http://localhost:8000`
 
 ## API Endpoints
 
@@ -147,9 +147,9 @@ Server runs at: `http://192.168.200.116:8000`
 
 Interactive documentation available at:
 
-- **Swagger UI:** http://192.168.200.116:8000/api/docs/
-- **ReDoc:** http://192.168.200.116:8000/api/redoc/
-- **OpenAPI Schema:** http://192.168.200.116:8000/api/schema/
+- **Swagger UI:** http://localhost:8000/api/docs/
+- **ReDoc:** http://localhost:8000/api/redoc/
+- **OpenAPI Schema:** http://localhost:8000/api/schema/
 
 ## Test Credentials
 
@@ -165,7 +165,7 @@ After running `seed_data`:
 
 ## Admin Panel
 
-Access Django admin at: http://192.168.200.116:8000/admin/
+Access Django admin at: http://localhost:8000/admin/
 
 Login with superuser credentials created earlier.
 

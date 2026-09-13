@@ -13,7 +13,15 @@ from drf_spectacular.views import (
     SpectacularRedocView,
 )
 
+from django.http import HttpResponse
+
+def root_view(request):
+    return HttpResponse("Backend is up and running securely!")
+
 urlpatterns = [
+    # Root URL
+    path('', root_view, name='root'),
+
     # Admin panel
     path('admin/', admin.site.urls),
 

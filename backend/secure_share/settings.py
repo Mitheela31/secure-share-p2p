@@ -15,7 +15,7 @@ SECRET_KEY = 'django-insecure-change-this-in-production-abc123xyz789'
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*']
+ALLOWED_HOSTS = ["127.0.0.1", "localhost", "10.239.31.147"]
 
 # Application definition
 INSTALLED_APPS = [
@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'drf_spectacular',
+    'django_extensions',
 
     # Local apps
     'users.apps.UsersConfig',
@@ -149,17 +150,9 @@ CORS_ALLOW_ALL_ORIGINS = True  # Development only - remove in production
 # Specific allowed origins (used when CORS_ALLOW_ALL_ORIGINS is False)
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",  # Vite default
-    "http://localhost:3000",  # React default
-    "http://localhost:8080",  # Alternative port
-    "http://localhost:8081",  # Alternative port
     "http://127.0.0.1:5173",
-    "http://127.0.0.1:3000",
+    "http://localhost:8080",  # Alternative port
     "http://127.0.0.1:8080",
-    "http://127.0.0.1:8081",
-    # LAN IP addresses for cross-device development
-    "http://10.80.187.147:8080",
-    "http://10.80.187.147:5173",
-    "http://10.80.187.147:3000",
 ]
 
 # Allow regex patterns for dynamic LAN IPs
@@ -209,4 +202,26 @@ SPECTACULAR_SETTINGS = {
     'DESCRIPTION': 'Backend API for secure peer-to-peer file transfer application',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
+}
+
+# Logging configuration to identify incoming API requests over LAN
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+    'loggers': {
+        'django.server': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
 }

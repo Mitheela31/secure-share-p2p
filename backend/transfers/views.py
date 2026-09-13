@@ -10,6 +10,7 @@ from django.shortcuts import get_object_or_404
 from django.db.models import Q
 from django.utils import timezone
 from django.contrib.auth import get_user_model
+from django.http import FileResponse
 
 from .models import Transfer, TransferLog
 from .serializers import (
@@ -22,6 +23,21 @@ from .serializers import (
 )
 
 User = get_user_model()
+
+
+def _build_encrypted_transfer_download_response(file_obj):
+    """Return encrypted bytes only for transfer downloads."""
+    file_obj.encrypted_file.open('rb')
+    response = FileResponse(
+        file_obj.encrypted_file,
+        as_attachment=True,
+        filename=f"{file_obj.uuid}.enc",
+        content_type='application/octet-stream',
+    )
+    response['Content-Disposition'] = f'attachment; filename="{file_obj.uuid}.enc"'
+    response['X-Content-Type-Options'] = 'nosniff'
+    response['X-Encrypted-Content'] = 'true'
+    return response
 
 
 class TransferListCreateView(generics.ListCreateAPIView):
@@ -951,11 +967,8 @@ class SecureTransferDownloadView(APIView):
         """
         Handle secure file download.
         
-        This method orchestrates the complete decryption workflow:
-        1. Validate user authorization
-        2. Decrypt AES key using shared secret
-        3. Decrypt file using AES key
-        4. Return decrypted file
+        This method only returns encrypted bytes. The client is responsible
+        for decrypting the file after fetching the response.
         """
         user = request.user
         
@@ -984,171 +997,40 @@ class SecureTransferDownloadView(APIView):
                 'status': 'error',
                 'message': 'You are not authorized to download this transfer.'
             }, status=status.HTTP_403_FORBIDDEN)
-        
-        # =====================================================================
-        # STEP 2: VALIDATE TRANSFER STATE
-        # =====================================================================
+
         if not transfer.file:
             return Response({
                 'status': 'error',
                 'message': 'No file associated with this transfer.'
             }, status=status.HTTP_404_NOT_FOUND)
-        
+
         file_obj = transfer.file
-        
+
         if not file_obj.encrypted_file:
             return Response({
                 'status': 'error',
                 'message': 'No encrypted content available.'
             }, status=status.HTTP_404_NOT_FOUND)
-        
+
         if not transfer.encrypted_aes_key:
             return Response({
                 'status': 'error',
                 'message': 'Missing encryption key data.'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # =====================================================================
-        # STEP 3: VALIDATE SESSION
-        # =====================================================================
-        session = transfer.session
-        
-        if not session:
+
+        if not transfer.key_iv:
             return Response({
                 'status': 'error',
-                'message': 'No session associated with this transfer.'
-            }, status=status.HTTP_403_FORBIDDEN)
-        
-        if not session.is_valid:
-            return Response({
-                'status': 'error',
-                'message': 'Session has expired. Please request a new transfer.'
-            }, status=status.HTTP_403_FORBIDDEN)
-        
-        # =====================================================================
-        # STEP 4: DECRYPT AES KEY
-        # =====================================================================
-        try:
-            from crypto.utils import decrypt_file, derive_aes_session_key
-            
-            # Get shared secret from session
-            shared_secret = base64.b64decode(session.shared_secret)
-            
-            # Derive key-encryption-key
-            kek = derive_aes_session_key(
-                shared_secret=shared_secret,
-                context=b"aes-key-encryption"
-            )
-            
-            # Decrypt AES key
-            encrypted_aes_key = base64.b64decode(transfer.encrypted_aes_key)
-            key_iv = bytes.fromhex(transfer.key_iv)
-            key_tag = bytes.fromhex(transfer.key_tag)
-            
-            aes_key = decrypt_file(
-                ciphertext=encrypted_aes_key,
-                aes_key=kek,
-                iv=key_iv,
-                tag=key_tag
-            )
-            
-        except Exception as e:
-            logger.error(
-                f"AES key decryption failed: transfer={transfer.id}, error={str(e)}"
-            )
-            return Response({
-                'status': 'error',
-                'message': 'Failed to decrypt transfer key. Transfer may be corrupted.'
+                'message': 'Missing key IV data.'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # =====================================================================
-        # STEP 5: DECRYPT FILE
-        # =====================================================================
-        try:
-            # Read encrypted file
-            file_obj.encrypted_file.seek(0)
-            ciphertext = file_obj.encrypted_file.read()
-            
-            # Get file IV and tag
-            file_iv = bytes.fromhex(file_obj.iv)
-            file_tag = bytes.fromhex(file_obj.tag)
-            
-            # Decrypt file
-            decrypted_content = decrypt_file(
-                ciphertext=ciphertext,
-                aes_key=aes_key,
-                iv=file_iv,
-                tag=file_tag
-            )
-            
-        except Exception as e:
-            logger.error(
-                f"File decryption failed: transfer={transfer.id}, error={str(e)}"
-            )
+
+        if not file_obj.is_encrypted:
             return Response({
                 'status': 'error',
-                'message': 'File decryption failed. File may be corrupted or tampered with.'
+                'message': 'Backend only serves encrypted content for this endpoint.'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
-        finally:
-            # Security: Clear sensitive data
-            try:
-                del aes_key
-                del kek
-                del shared_secret
-            except:
-                pass
-        
-        # =====================================================================
-        # STEP 6: UPDATE TRANSFER STATUS
-        # =====================================================================
-        if transfer.status == 'sent' and is_receiver:
-            transfer.status = 'completed'
-            transfer.completed_at = timezone.now()
-            transfer.progress = 100
-            transfer.bytes_transferred = file_obj.size
-            transfer.save()
-            
-            # Log download
-            TransferLog.objects.create(
-                transfer=transfer,
-                event='status_changed',
-                old_status='sent',
-                new_status='completed',
-                message=f"File downloaded by {user.username}"
-            )
-        
-        # Update file download stats
-        if not file_obj.is_decrypted:
-            file_obj.is_decrypted = True
-            file_obj.downloaded_at = timezone.now()
-        file_obj.download_count += 1
-        file_obj.save()
-        
-        # Log success
-        logger.info(
-            f"Secure download completed: transfer={transfer.id}, "
-            f"user={user.id}, role={'sender' if is_sender else 'receiver'}"
-        )
-        
-        # =====================================================================
-        # STEP 7: RETURN DECRYPTED FILE
-        # =====================================================================
-        decrypted_stream = BytesIO(decrypted_content)
-        
-        response = FileResponse(
-            decrypted_stream,
-            content_type=file_obj.mime_type,
-            as_attachment=True,
-            filename=file_obj.original_name
-        )
-        
-        response['Content-Length'] = len(decrypted_content)
-        response['X-Content-Type-Options'] = 'nosniff'
-        
-        del decrypted_content
-        
-        return response
+
+        return _build_encrypted_transfer_download_response(file_obj)
 
 
 class SecureTransferDetailView(APIView):

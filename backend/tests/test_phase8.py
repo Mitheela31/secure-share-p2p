@@ -24,6 +24,7 @@ To run with verbose output:
 =============================================================================
 """
 
+import base64
 import json
 from io import BytesIO
 from django.test import TestCase, override_settings
@@ -299,7 +300,8 @@ class FileTransferTests(APITestCase):
             original_name='transfer_test.pdf',
             size=1024,
             mime_type='application/pdf',
-            owner=self.sender
+            owner=self.sender,
+            iv=base64.b64encode(b'\x02' * 12).decode('ascii')
         )
         
         self.client = APIClient()
@@ -320,7 +322,10 @@ class FileTransferTests(APITestCase):
         
         data = {
             'receiver_id': self.receiver.id,
-            'file_id': self.test_file.id
+            'file_id': self.test_file.id,
+            'file_name': self.test_file.original_name,
+            'aes_key': base64.b64encode(b'\x01' * 32).decode('ascii'),
+            'iv': self.test_file.iv,
         }
         response = self.client.post(self.transfers_url, data, format='json')
         

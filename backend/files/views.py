@@ -5,7 +5,6 @@ File views for file metadata management.
 import base64
 import hashlib
 import logging
-from io import BytesIO
 from django.core.files.base import ContentFile
 from django.http import FileResponse
 from django.utils import timezone
@@ -30,6 +29,35 @@ from .serializers import (
 logger = logging.getLogger(__name__)
 
 
+def _decode_iv_for_validation(iv_raw):
+    """Decode IV from base64 or comma-separated bytes and enforce 12-byte nonce."""
+    if iv_raw is None:
+        raise ValueError('IV missing')
+
+    value = str(iv_raw).strip()
+    if not value:
+        raise ValueError('IV missing')
+
+    if ',' in value:
+        try:
+            parts = [int(part.strip()) for part in value.split(',') if part.strip()]
+        except ValueError as error:
+            raise ValueError('Invalid IV format') from error
+
+        iv_bytes = bytes(parts)
+    else:
+        try:
+            padded = value + ('=' * ((4 - len(value) % 4) % 4))
+            iv_bytes = base64.b64decode(padded, validate=True)
+        except Exception as error:
+            raise ValueError('Invalid IV format') from error
+
+    if len(iv_bytes) != 12:
+        raise ValueError('Invalid IV length')
+
+    return iv_bytes
+
+
 def _user_can_download_file(user, file_obj):
     """
     Academic note:
@@ -50,146 +78,18 @@ def _user_can_download_file(user, file_obj):
     return is_owner, is_receiver
 
 
-def _build_plain_file_download_response(file_obj):
-    """
-    Return a direct file download for non-encrypted files stored on disk.
-
-    Academic note:
-    The file handle is opened in binary mode and streamed via FileResponse so
-    large files are not fully loaded into memory.
-    """
-    file_handle = file_obj.file_path.open('rb')
+def _build_encrypted_file_download_response(file_obj):
+    """Return encrypted bytes only. Plaintext is never returned by backend."""
+    file_obj.encrypted_file.open('rb')
     response = FileResponse(
-        file_handle,
+        file_obj.encrypted_file,
         as_attachment=True,
-        filename=file_obj.original_name,
-        content_type=file_obj.mime_type,
+        filename=f"{file_obj.uuid}.enc",
+        content_type='application/octet-stream',
     )
-    response['Content-Disposition'] = f'attachment; filename="{file_obj.original_name}"'
+    response['Content-Disposition'] = f'attachment; filename="{file_obj.uuid}.enc"'
     response['X-Content-Type-Options'] = 'nosniff'
-    return response
-
-
-def _build_secure_file_download_response(file_obj, user):
-    """
-    Decrypt the stored encrypted file and stream it as an attachment.
-
-    This is the core download routine used by both:
-    - GET /api/v1/files/<file_id>/download/
-    - GET /api/v1/files/<uuid>/secure-download/
-    """
-    session = file_obj.session
-
-    if not file_obj.encrypted_file:
-        return Response({
-            'status': 'error',
-            'message': 'No encrypted content available for this file.'
-        }, status=status.HTTP_404_NOT_FOUND)
-
-    if not file_obj.iv or not file_obj.tag:
-        return Response({
-            'status': 'error',
-            'message': 'Missing encryption parameters (IV or tag).'
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    if not session:
-        return Response({
-            'status': 'error',
-            'message': 'No session associated with this file.'
-        }, status=status.HTTP_403_FORBIDDEN)
-
-    if not session.is_active:
-        return Response({
-            'status': 'error',
-            'message': 'Session has been revoked. Cannot decrypt file.'
-        }, status=status.HTTP_403_FORBIDDEN)
-
-    if session.is_expired or not session.is_valid:
-        return Response({
-            'status': 'error',
-            'message': 'Session is no longer valid.'
-        }, status=status.HTTP_403_FORBIDDEN)
-
-    try:
-        from crypto.utils import derive_aes_session_key, decrypt_file
-
-        shared_secret = base64.b64decode(session.shared_secret)
-        aes_key = derive_aes_session_key(
-            shared_secret=shared_secret,
-            context=f"file-encryption:{session.id}".encode('utf-8')
-        )
-    except Exception as error:
-        logger.error(
-            f"Key derivation failed: file={file_obj.id}, error={str(error)}"
-        )
-        return Response({
-            'status': 'error',
-            'message': 'Failed to derive decryption key.'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    try:
-        file_obj.encrypted_file.seek(0)
-        ciphertext = file_obj.encrypted_file.read()
-        iv = bytes.fromhex(file_obj.iv)
-        tag = bytes.fromhex(file_obj.tag)
-    except Exception as error:
-        logger.error(
-            f"Failed to read encrypted file: file={file_obj.id}, error={str(error)}"
-        )
-        return Response({
-            'status': 'error',
-            'message': 'Failed to read encrypted file.'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    try:
-        decrypted_content = decrypt_file(
-            ciphertext=ciphertext,
-            aes_key=aes_key,
-            iv=iv,
-            tag=tag
-        )
-    except Exception:
-        logger.error(
-            f"Decryption failed: file={file_obj.id}, user={user.id}"
-        )
-        return Response({
-            'status': 'error',
-            'message': 'Decryption failed. File may be corrupted or tampered with.'
-        }, status=status.HTTP_400_BAD_REQUEST)
-    finally:
-        try:
-            del aes_key
-            del shared_secret
-            del ciphertext
-        except Exception:
-            pass
-
-    try:
-        if not file_obj.is_decrypted:
-            file_obj.is_decrypted = True
-            file_obj.downloaded_at = timezone.now()
-
-        file_obj.download_count += 1
-        file_obj.save(update_fields=['is_decrypted', 'downloaded_at', 'download_count', 'updated_at'])
-    except Exception as error:
-        logger.warning(
-            f"Failed to update file metadata: file={file_obj.id}, error={str(error)}"
-        )
-
-    logger.info(
-        f"Secure file downloaded: file_id={file_obj.id}, user={user.id}, size={len(decrypted_content)}"
-    )
-
-    decrypted_stream = BytesIO(decrypted_content)
-    response = FileResponse(
-        decrypted_stream,
-        content_type=file_obj.mime_type,
-        as_attachment=True,
-        filename=file_obj.original_name,
-    )
-    response['Content-Length'] = len(decrypted_content)
-    response['X-Content-Type-Options'] = 'nosniff'
-    del decrypted_content
+    response['X-Encrypted-Content'] = 'true'
     return response
 
 
@@ -197,11 +97,10 @@ def _build_download_response(request, file_obj):
     """
     Shared download flow used by all file download endpoints.
 
-    Flow for academic presentation:
-    1. Verify the requester is either sender or receiver
-    2. If the file is encrypted, decrypt in memory and stream it
-    3. If the file is plain, stream it directly from storage
-    4. Return FileResponse with Content-Disposition attachment header
+    Strict production flow:
+    1. Verify requester is sender or intended receiver
+    2. Return encrypted bytes only
+    3. Never return plaintext from backend
     """
     user = request.user
     is_owner, is_receiver = _user_can_download_file(user, file_obj)
@@ -226,11 +125,21 @@ def _build_download_response(request, file_obj):
             'message': 'You are not authorized to download this file.'
         }, status=status.HTTP_403_FORBIDDEN)
 
-    if file_obj.is_encrypted:
-        return _build_secure_file_download_response(file_obj, user)
+    if not file_obj.is_encrypted:
+        return Response({
+            'status': 'error',
+            'message': 'Backend only serves encrypted content for this endpoint.'
+        }, status=status.HTTP_400_BAD_REQUEST)
 
-    if file_obj.file_path:
-        return _build_plain_file_download_response(file_obj)
+    try:
+        file_obj.download_count += 1
+        if not file_obj.downloaded_at:
+            file_obj.downloaded_at = timezone.now()
+        file_obj.save(update_fields=['download_count', 'downloaded_at', 'updated_at'])
+    except Exception as error:
+        logger.warning('Failed to update encrypted download metadata: file=%s error=%s', file_obj.id, str(error))
+
+    return _build_encrypted_file_download_response(file_obj)
 
     return Response({
         'status': 'error',
@@ -407,12 +316,22 @@ class FileUploadView(APIView):
             logger.error('Encrypted file upload rejected: no file provided by user=%s', request.user.id)
             return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
 
-        original_name = request.data.get('filename') or uploaded_file.name
+        original_name = request.data.get('original_filename')
+        if original_name is None or str(original_name).strip() == '':
+            uploaded_name = getattr(uploaded_file, 'name', '') or ''
+            original_name = uploaded_name[:-4] if uploaded_name.endswith('.enc') else uploaded_name
+        original_name = str(original_name).strip()
+        if not original_name:
+            return Response({'error': 'Original filename missing'}, status=status.HTTP_400_BAD_REQUEST)
 
         hasher = hashlib.sha256()
         for chunk in uploaded_file.chunks():
             hasher.update(chunk)
         checksum = hasher.hexdigest()
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
 
         logger.info(
             'Uploading encrypted file for storage: user=%s filename=%s size=%s',
@@ -425,17 +344,22 @@ class FileUploadView(APIView):
             name=original_name,
             original_name=original_name,
             size=uploaded_file.size,
-            mime_type=uploaded_file.content_type or 'application/octet-stream',
+            mime_type='application/octet-stream',
             checksum=checksum,
-            is_encrypted=False,
+            is_encrypted=True,
+            encryption_algorithm='AES-256-GCM',
             owner=request.user,
             encrypted_file=uploaded_file,
-            file_path=uploaded_file,
+            iv=None,
+            tag=None,
+            file_path=None,
         )
 
         logger.info('Encrypted file stored successfully: file_id=%s encrypted_file=%s', file_obj.id, bool(file_obj.encrypted_file))
 
-        return Response({"id": file_obj.id}, status=status.HTTP_201_CREATED)
+        return Response({
+            "id": file_obj.id,
+        }, status=status.HTTP_201_CREATED)
 
 
 class FileChunkListView(generics.ListCreateAPIView):
